@@ -67,8 +67,6 @@ def train():
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=lambda step: min(step, FLAGS.warmup) / FLAGS.warmup)
     trainer = GaussianDiffusionTrainer(net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T).to(device)
-    net_sampler = GaussianDiffusionSampler(net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.img_size, FLAGS.mean_type, FLAGS.var_type).to(device)
-    ema_sampler = GaussianDiffusionSampler(ema_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.img_size, FLAGS.mean_type, FLAGS.var_type).to(device)
     
     os.makedirs(os.path.join(FLAGS.logdir, 'sample'))
     writer = SummaryWriter(FLAGS.logdir)
@@ -77,14 +75,26 @@ def train():
         for step in pbar:
             optim.zero_grad()
             x_0 = next(iter(dataloader))[0].to(device)
-            loss = trainer(x_0).mean()
-            loss.backward()
+            
+            # Generate noisy image
+            noise = torch.randn_like(x_0)
+            x_noisy = x_0 + noise
+            
+            # Predict noise and denoise
+            estimated_noise, denoised_x = net_model(x_noisy, torch.randint(0, FLAGS.T, (x_0.shape[0],)).to(device))
+            
+            # Compute losses
+            noise_loss = torch.nn.functional.mse_loss(estimated_noise, noise)
+            denoise_loss = torch.nn.functional.mse_loss(denoised_x, x_0)
+            total_loss = noise_loss + denoise_loss
+            
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(net_model.parameters(), FLAGS.grad_clip)
             optim.step()
             sched.step()
 
-            writer.add_scalar('loss', loss, step)
-            pbar.set_postfix(loss='%.3f' % loss)
+            writer.add_scalar('loss', total_loss, step)
+            pbar.set_postfix(loss='%.3f' % total_loss.item())
     writer.close()
 
 def main(argv):
